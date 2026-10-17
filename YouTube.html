@@ -106,6 +106,8 @@ select,input[type=text],input[type=number]{color:var(--fg);background:var(--surf
 .row .r1{color:var(--t1)}
 .row.on{background:var(--surface2);border-left-color:var(--accent)}
 .keys{margin:10px 0 0;color:var(--muted);font-size:12.5px;line-height:1.9}
+.adbadge{position:absolute;top:10px;left:10px;z-index:2;background:rgba(0,0,0,.72);color:#ffd166;font-size:13px;padding:4px 12px;border-radius:999px;pointer-events:none}
+.adtxt{font:700 12px var(--font-mono)}
 code{font:12px var(--font-mono);background:var(--surface2);padding:2px 6px;border-radius:4px;overflow-wrap:anywhere}
 kbd{font:11px var(--font-mono);border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:1px 5px;background:var(--surface2);color:var(--fg)}
 @media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
@@ -157,6 +159,7 @@ kbd{font:11px var(--font-mono);border:1px solid var(--line);border-bottom-width:
               <p>YouTube 주소를 붙여넣거나 내 영상 파일을 고르세요. 자막 파일(.srt, .vtt)은 이 화면에 끌어다 놓아도 돼요.</p>
             </div>
           </div>
+          <div class="adbadge" id="adBadge" hidden></div>
           <div class="subs" id="subs">
             <p class="t0" data-t="0" hidden></p>
             <p class="t1" data-t="1" hidden></p>
@@ -167,6 +170,7 @@ kbd{font:11px var(--font-mono);border:1px solid var(--line);border-bottom-width:
           <button class="ib" id="btnPrev" type="button" aria-label="이전 자막" title="이전 자막 (A)"><svg><use href="#i-prev"/></svg></button>
           <button class="ib" id="btnNext" type="button" aria-label="다음 자막" title="다음 자막 (D)"><svg><use href="#i-next"/></svg></button>
           <button class="ib" id="btnLoop" type="button" aria-pressed="false" aria-label="현재 자막 반복" title="현재 자막 반복 (R)"><svg><use href="#i-loop"/></svg></button>
+          <button class="ib" id="btnAd" type="button" aria-pressed="false" aria-label="광고 중 자막 숨기기" title="광고 중 자막 숨기기 (자동으로 안 숨겨질 때)" hidden><span class="adtxt">AD</span></button>
           <input class="scrub" type="range" id="scrub" min="0" max="0" step="0.1" value="0" aria-label="재생 위치">
           <span class="time" id="timeEl">00:00 / 00:00</span>
           <select id="rate" aria-label="재생 속도">
@@ -290,13 +294,13 @@ function parseYtId(u){
 
 const $ = (s, r = document) => r.querySelector(s);
 const player = $('#player'), stage = $('#stage'), subsEl = $('#subs'), emptyEl = $('#empty'), vid = $('#vid');
-const scrub = $('#scrub'), timeEl = $('#timeEl'), playIcon = $('#playIcon'), listEl = $('#list');
+const adBadge = $('#adBadge'), scrub = $('#scrub'), timeEl = $('#timeEl'), playIcon = $('#playIcon'), listEl = $('#list');
 const tracks = [0, 1].map(() => ({ cues: [], offset: 0, visible: true, src: '', last: -2 }));
 const S = { fsTop: 2.8, fsBot: 2.3, bg: 0.55, place: 'overlay', swap: false };
 const KEY = 'dualsub.v1';
 const smooth = !matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-let media = null, repeat = null, ytApiPromise = null, openToken = 0;
+let media = null, repeat = null, ytApiPromise = null, openToken = 0, manualAd = false, lastAdKey = '';
 let curVideoId = null, rows = [], activeRow = -1, holdScroll = 0, dragging = false;
 let lastPlaying = null, lastDur = -1, lastTimeText = '', listTimer = 0;
 
@@ -379,13 +383,30 @@ async function loadSubFile(i, file){
   } catch (e) { setStatus(i, e.message, true); }
 }
 
+/* ---------- 광고 판정 ----------
+   광고가 나오는 동안 YouTube는 광고의 길이를 돌려줘요. 자막이 영상 길이보다 훨씬 길면 광고 중으로 봅니다. */
+function inAd(){
+  if (!media || media.kind !== 'yt') return false;
+  if (manualAd) return true;
+  const d = media.getDuration();
+  if (!(d > 0)) return false;
+  let end = 0;
+  tracks.forEach(tr => { if (tr.cues.length) end = Math.max(end, tr.cues[tr.cues.length - 1].e + tr.offset); });
+  return end > d + 5;
+}
+function syncAd(){
+  $('#btnAd').setAttribute('aria-pressed', manualAd ? 'true' : 'false');
+  adBadge.hidden = true; lastAdKey = '';
+}
+
 /* ---------- 자막 그리기 ---------- */
 function curT(){ return media ? media.getTime() : 0; }
 function renderSubs(t, force){
   let shown = 0;
+  const ad = inAd();
   (S.swap ? [1, 0] : [0, 1]).forEach(i => {
     const tr = tracks[i], p = subsEl.querySelector('[data-t="' + i + '"]');
-    const idx = (tr.visible && tr.cues.length) ? cueAt(tr.cues, t - tr.offset) : -1;
+    const idx = (!ad && tr.visible && tr.cues.length) ? cueAt(tr.cues, t - tr.offset) : -1;
     if (force || idx !== tr.last) { tr.last = idx; p.textContent = idx >= 0 ? tr.cues[idx].t : ''; }
     const has = idx >= 0;
     p.hidden = !has;
@@ -428,7 +449,7 @@ function buildList(){
 function highlight(t){
   const b = baseTrack();
   if (b < 0 || !rows.length) return;
-  const idx = cueAt(tracks[b].cues, t - tracks[b].offset);
+  const idx = inAd() ? -1 : cueAt(tracks[b].cues, t - tracks[b].offset);
   if (idx === activeRow) return;
   if (rows[activeRow]) rows[activeRow].classList.remove('on');
   activeRow = idx;
@@ -442,7 +463,7 @@ function highlight(t){
 /* ---------- 영상 어댑터 ---------- */
 function destroyMedia(){
   if (media && media.destroy) media.destroy();
-  media = null; repeat = null; syncLoop(); lastPlaying = null; lastDur = -1;
+  media = null; repeat = null; syncLoop(); lastPlaying = null; lastDur = -1; manualAd = false; syncAd();
 }
 function applyRate(){ if (media) media.setRate(+$('#rate').value); }
 function setMsg(text, isErr){
@@ -466,7 +487,7 @@ function openFile(file){
     isMuted: () => vid.muted,
     destroy(){ vid.pause(); vid.removeAttribute('src'); vid.load(); vid.hidden = true; URL.revokeObjectURL(url); }
   };
-  curVideoId = null; applyRate();
+  curVideoId = null; applyRate(); $('#shield').hidden = false; $('#btnAd').hidden = true;
   $('#fileName').textContent = file.name; setMsg('');
 }
 function loadYtApi(){
@@ -521,6 +542,7 @@ async function openYouTube(id){
     destroy(){ try { yt.destroy(); } catch (e) {} }
   };
   applyRate(); setMsg('');
+  $('#shield').hidden = true; $('#btnAd').hidden = false;
   return true;
 }
 
@@ -572,7 +594,12 @@ function tick(){
   requestAnimationFrame(tick);
   if (!media) return;
   const t = media.getTime();
-  if (repeat && t >= repeat.e && media.isPlaying()) media.seek(repeat.s);
+  const ad = inAd(), adKey = ad + ':' + manualAd;
+  if (adKey !== lastAdKey) {
+    lastAdKey = adKey; adBadge.hidden = !ad;
+    adBadge.textContent = manualAd ? '광고 중 · AD 버튼을 다시 누르면 해제' : '광고 중 · 자막은 광고가 끝나면 나와요';
+  }
+  if (repeat && !ad && t >= repeat.e && media.isPlaying()) media.seek(repeat.s);
   renderSubs(t, false);
   highlight(t);
   const d = media.getDuration();
@@ -601,6 +628,7 @@ $('#shield').addEventListener('click', toggle);
 $('#btnPrev').addEventListener('click', () => jumpCue(-1));
 $('#btnNext').addEventListener('click', () => jumpCue(1));
 $('#btnLoop').addEventListener('click', toggleRepeat);
+$('#btnAd').addEventListener('click', () => { manualAd = !manualAd; syncAd(); renderSubs(curT(), true); });
 $('#btnMute').addEventListener('click', toggleMute);
 $('#btnFull').addEventListener('click', toggleFull);
 $('#rate').addEventListener('change', applyRate);
